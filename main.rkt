@@ -16,6 +16,13 @@
 (struct http-request (get))
 (struct node (node-id-to-folder-id folder-id-to-node-id next-node-id))
 
+(define (list-drop lst cnt)
+  (if (zero? cnt)
+    lst
+    (match lst
+                [(list-rest head tail) (list-drop tail (sub1 cnt))]
+                [empty empty])))
+
 (define (safe-hash-ref hash key)
   (define result (hash-ref hash key nothing))
   (if (nothing? result)
@@ -92,12 +99,6 @@
   (begin
     (displayln (string-append "inode: " (~a nodeid)))
     (displayln (string-append "lookup name: " (path->string name)))
-    (reply-entry #:generation 0 #:entry-valid  (timespec 1 0) #:attr-valid  (timespec 1 0)
-                 #:inode 2 #:rdev 0 #:size 13 #:blocks 1
-                 #:atime  (timespec 1381237736 0) #:mtime  (timespec 1381237736 0)
-                 #:ctime  (timespec 1381237736 0) #:kind 'S_IFREG
-                 #:perm '(S_IRUSR S_IWUSR S_IRGRP S_IROTH)
-                 #:nlink 1 #:uid 1000 #:gid 1000)
     (error 'ENOENT)
     )
   )
@@ -188,9 +189,19 @@
                     (async-channel-put channel node-id-cache)
                     (error 'ENOENT))]
          [(just id) (begin
+                      (displayln (string-append "offset: " (~a offset)))
                       (displayln (string-append "found entry for nodeid: " (~a id)))
-                      (let ([node (content-to-dentry (list-folder http-request id) nid-to-fid fid-to-nid next-id 1 reply-add reply-done)])
+                      (let ([node (handle-list-folder id offset http-request node-id-cache nid-to-fid fid-to-nid next-id reply-add reply-done error)])
                           (async-channel-put channel node)))]))
+
+(define (handle-list-folder id offset request node-id-cache nid-to-fid fid-to-nid next-id reply-add reply-done error)
+  (define result (list-drop (list-folder request id) offset))
+  (if (empty? result)
+    (begin
+      (error 'ENOENT)
+      node-id-cache)
+    (content-to-dentry result nid-to-fid fid-to-nid next-id 1 reply-add reply-done)))
+
 
 (define (getattr #:nodeid nodeid #:info info #:reply reply-attr #:error error)
   (begin
