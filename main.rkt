@@ -16,6 +16,13 @@
 (struct http-request (get))
 (struct node (node-id-to-folder-id folder-id-to-node-id next-node-id))
 
+(define (list-find-first lst predicate)
+  (match lst
+         [(list-rest head tail) (if (predicate head)
+                                  (just head)
+                                  (list-find-first tail predicate))]
+         [empty nothing]))
+
 (define (list-drop lst cnt)
   (if (zero? cnt)
     lst
@@ -78,9 +85,12 @@
 
 (define (list-folder http-request folder-id #:headers [headers empty])
   (define with-accept (cons "Accept: application/json" headers))
-  (sort
-    (parse-folder-content (http-response-body ((http-request-get http-request) (string-append "/pubapi/v1/fs/ids/folder/" folder-id) #:headers with-accept)))
-    comparing-by-name))
+  (define response ((http-request-get http-request) (string-append "/pubapi/v1/fs/ids/folder/" folder-id) #:headers with-accept))
+  (if (equal? (http-response-status response) 200)
+    (sort
+      (parse-folder-content (http-response-body response))
+      comparing-by-name)
+    empty))
 
 
 (define (mkdir #:nodeid nodeid #:name name #:mode mode #:umask umask #:reply reply-entry #:error error)
@@ -95,13 +105,52 @@
     )
   )
 
-(define (handler-lookup #:channel channel #:nodeid nodeid #:name name #:reply reply-entry #:error error)
+(define (by-name entry-name)
+  (lambda (entry) (match entry
+                         [(file name _ _) (string=? entry-name name)]
+                         [(folder name _ _) (string=? entry-name name)])))
+
+(define (handler-lookup http-request #:channel channel #:nodeid nodeid #:name name #:reply reply-entry #:error error)
+  (define node-id-cache (async-channel-get channel))
+  (define folder-id (hash-ref (node-node-id-to-folder-id node-id-cache) nodeid))
+  (define entry (list-find-first (list-folder http-request folder-id) (by-name (path->string name))))
+  (define nid-to-fid (node-node-id-to-folder-id node-id-cache))
+  (define fid-to-nid (node-folder-id-to-node-id node-id-cache))
+  (define next-id (node-next-node-id node-id-cache))
+  (define (new-cache-and-id entry-id)
+    (if (hash-has-key? fid-to-nid entry-id)
+      (cons (hash-ref fid-to-nid entry-id) node-id-cache)
+      (cons next-id (node (hash-set nid-to-fid next-id entry-id) (hash-set fid-to-nid entry-id next-id) (add1 next-id)))
+      ))
+  (define (entry-node-id entry)
+    (match entry
+           [(folder _ _ folder-id) (new-cache-and-id folder-id)]
+           [(file _ _ entry-id) (new-cache-and-id entry-id)]))
+  (define (entry-kind entry)
+    (match entry
+           [(folder _ _ _) 'S_IFDIR]
+           [(file _ _ _) 'S_IFREG]))
   (begin
     (displayln (string-append "inode: " (~a nodeid)))
     (displayln (string-append "lookup name: " (path->string name)))
-    (error 'ENOENT)
-    )
-  )
+    (match entry
+           [(nothing) (begin
+                        (define dupa 5)
+                        (displayln "No matching entry")
+                        (async-channel-put channel node-id-cache)
+                        (error 'ENOENT))]
+           [(just e) (begin
+                       (define cache-and-id (new-cache-and-id e))
+                       (displayln "Found matching entry")
+                       (reply-entry #:generation 0
+                                    #:entry-valid  (timespec 1 0) #:attr-valid  (timespec 1 0)
+                                    #:inode (car cache-and-id) #:rdev 0 #:size 13 #:blocks 1
+                                    #:atime  (timespec 1381237736 0) #:mtime  (timespec 1381237736 0)
+                                    #:ctime  (timespec 1381237736 0) #:kind (entry-kind e)
+                                    #:perm '(S_IRUSR S_IWUSR S_IRGRP S_IROTH)
+                                    #:nlink 1 #:uid 1000 #:gid 1000)
+                       (async-channel-put channel (cdr cache-and-id))
+                       )])))
 
 (define (handle-init http-request #:channel channel)
   (define root-id (get-root-id http-request))
@@ -112,9 +161,7 @@
     #t))
 
 (define (content-to-dentry content
-                           node-id-to-folder-id
-                           folder-id-to-node-id
-                           next-node-id
+                           parent-nodeid
                            offset
                            reply-add
                            reply-done)
@@ -122,53 +169,26 @@
   (define (add-folder name inode offset) (reply-add #:inode inode #:offset offset #:kind 'S_IFDIR #:name (string->path name)))
   (match content
          [(list-rest head tail) (match head
-                                       [(file name _ entry-id) (if (hash-has-key? folder-id-to-node-id entry-id)
-                                                                 (begin
+                                       [(file name _ entry-id) (begin
                                                                    (displayln (string-append "filename: " name))
-                                                                   (add-file name (hash-ref folder-id-to-node-id entry-id) offset)
+                                                                   (add-file name parent-nodeid  offset)
                                                                    (content-to-dentry tail
-                                                                                      node-id-to-folder-id
-                                                                                      folder-id-to-node-id
-                                                                                      next-node-id
+                                                                                      parent-nodeid
                                                                                       (add1 offset)
                                                                                       reply-add
-                                                                                      reply-done))
-                                                                 (begin
-                                                                   (displayln (string-append "filename: " name))
-                                                                   (add-file name next-node-id offset)
-                                                                   (content-to-dentry tail
-                                                                                      (hash-set node-id-to-folder-id next-node-id entry-id)
-                                                                                      (hash-set folder-id-to-node-id entry-id next-node-id)
-                                                                                      (add1 next-node-id)
-                                                                                      (add1 offset)
-                                                                                      reply-add
-                                                                                      reply-done)))]
-                                       [(folder name _ folder-id) (if (hash-has-key? folder-id-to-node-id folder-id)
-                                                                    (begin
+                                                                                      reply-done))]
+                                       [(folder name _ folder-id) (begin
                                                                    (displayln (string-append "folder name " name))
-                                                                      (add-folder name (hash-ref folder-id-to-node-id folder-id) offset)
+                                                                      (add-folder name parent-nodeid offset)
                                                                       (content-to-dentry tail
-                                                                                         node-id-to-folder-id
-                                                                                         folder-id-to-node-id
-                                                                                         next-node-id
+                                                                                         parent-nodeid
                                                                                          (add1 offset)
                                                                                          reply-add
-                                                                                         reply-done))
-                                                                    (begin
-                                                                   (displayln (string-append "folder name " name))
-                                                                      (add-folder name next-node-id offset)
-                                                                      (content-to-dentry tail
-                                                                                         (hash-set node-id-to-folder-id next-node-id folder-id)
-                                                                                         (hash-set folder-id-to-node-id folder-id next-node-id)
-                                                                                         (add1 next-node-id)
-                                                                                         (add1 offset)
-                                                                                         reply-add
-                                                                                         reply-done)))]
-                                       )]
+                                                                                         reply-done))])]
          [empty (begin
                   (displayln "Empty list")
                   (reply-done)
-                  (node node-id-to-folder-id folder-id-to-node-id next-node-id))]))
+                  )]))
 
 (define (handler-readdir http-request
                          #:channel channel
@@ -183,24 +203,24 @@
   (define nid-to-fid (node-node-id-to-folder-id node-id-cache))
   (define next-id (node-next-node-id node-id-cache))
   (define current-folder-id (safe-hash-ref nid-to-fid nodeid))
-  (match current-folder-id
-         [(nothing) (begin
-                    (displayln (string-append "no entry for nodeid: " (~a nodeid)))
-                    (async-channel-put channel node-id-cache)
-                    (error 'ENOENT))]
-         [(just id) (begin
-                      (displayln (string-append "offset: " (~a offset)))
-                      (displayln (string-append "found entry for nodeid: " (~a id)))
-                      (let ([node (handle-list-folder id offset http-request node-id-cache nid-to-fid fid-to-nid next-id reply-add reply-done error)])
-                          (async-channel-put channel node)))]))
+  (begin
+    (displayln (string-append "readdir nodeid: " (~a nodeid)))
+    (match current-folder-id
+           [(nothing) (begin
+                        (displayln (string-append "no entry for nodeid: " (~a nodeid)))
+                        (async-channel-put channel node-id-cache)
+                        (error 'ENOENT))]
+           [(just id) (begin
+                        (displayln (string-append "offset: " (~a offset)))
+                        (displayln (string-append "found entry for nodeid: " (~a id)))
+                        (handle-list-folder http-request id nodeid offset reply-add reply-done error)
+                        (async-channel-put channel node-id-cache))])))
 
-(define (handle-list-folder id offset request node-id-cache nid-to-fid fid-to-nid next-id reply-add reply-done error)
+(define (handle-list-folder request id node-id offset reply-add reply-done error)
   (define result (list-drop (list-folder request id) offset))
   (if (empty? result)
-    (begin
-      (error 'ENOENT)
-      node-id-cache)
-    (content-to-dentry result nid-to-fid fid-to-nid next-id 1 reply-add reply-done)))
+    (error 'ENOENT)
+    (content-to-dentry result node-id 1 reply-add reply-done)))
 
 
 (define (getattr #:nodeid nodeid #:info info #:reply reply-attr #:error error)
@@ -221,8 +241,8 @@
   )
 
 (define (fs http-request)
-  (let ([work-channel (make-async-channel 1)])
-      (make-filesystem #:lookup (partial handler-lookup #:channel work-channel)
+  (let ([work-channel (make-async-channel #f)])
+      (make-filesystem #:lookup (partial handler-lookup http-request #:channel work-channel)
                        #:init (partial handle-init http-request #:channel work-channel)
                        #:readdir (partial handler-readdir http-request #:channel work-channel)
                        #:getattr getattr
