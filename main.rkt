@@ -36,13 +36,6 @@
     result
     (just result)))
 
-(define (comparing-by-name fst snd)
-  (match* (fst snd)
-         [((folder name1 _ _) (folder name2 _ _)) (string<=? name1 name2)]
-         [((folder name1 _ _) (file name2 _ _)) (string<=? name1 name2)]
-         [((file name1 _ _) (folder name2 _ _)) (string<=? name1 name2)]
-         [((file name1 _ _) (file name2 _ _)) (string<=? name1 name2)]))
-
 (define (create-http-request host token)
   (http-request (partial http-get host #:token token)))
 
@@ -86,10 +79,15 @@
 (define (list-folder http-request folder-id #:headers [headers empty])
   (define with-accept (cons "Accept: application/json" headers))
   (define response ((http-request-get http-request) (string-append "/pubapi/v1/fs/ids/folder/" folder-id) #:headers with-accept))
+  (define (extracting-entry-name entry)
+    (match entry
+           [(file name _ _) name]
+           [(folder name _ _) name]))
   (if (equal? (http-response-status response) 200)
     (sort
       (parse-folder-content (http-response-body response))
-      comparing-by-name)
+      string<=?
+      #:key extracting-entry-name)
     empty))
 
 
