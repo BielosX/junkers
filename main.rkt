@@ -135,7 +135,6 @@
     (displayln (string-append "lookup name: " (path->string name)))
     (match entry
            [(nothing) (begin
-                        (define dupa 5)
                         (displayln "No matching entry")
                         (async-channel-put channel node-id-cache)
                         (error 'ENOENT))]
