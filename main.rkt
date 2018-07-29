@@ -1,14 +1,14 @@
 #lang racket
 
-(require racket/cmdline)
-(require fuse)
-(require kw-utils/partial)
-(require racket/async-channel)
-(require net/http-client)
-(require json)
-(require racket/match)
-(require racket/port)
-(require data/maybe)
+(require racket/cmdline
+         fuse
+         kw-utils/partial
+         racket/async-channel
+         net/http-client
+         json
+         racket/match
+         racket/port
+         data/maybe)
 
 (struct folder (name last-modified folder-id))
 (struct file (name last-modified entry-id))
