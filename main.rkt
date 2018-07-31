@@ -108,10 +108,12 @@
                          [(file name _ _) (string=? entry-name name)]
                          [(folder name _ _) (string=? entry-name name)])))
 
+(define blacklist (list ".git" "HEAD"))
+
 (define (handler-lookup http-request #:channel channel #:nodeid nodeid #:name name #:reply reply-entry #:error error)
   (define node-id-cache (async-channel-get channel))
   (define folder-id (hash-ref (node-node-id-to-folder-id node-id-cache) nodeid))
-  (define entry (list-find-first (list-folder http-request folder-id) (by-name (path->string name))))
+  (define (find-entry folder-id)  (list-find-first (list-folder http-request folder-id) (by-name (path->string name))))
   (define nid-to-fid (node-node-id-to-folder-id node-id-cache))
   (define fid-to-nid (node-folder-id-to-node-id node-id-cache))
   (define next-id (node-next-node-id node-id-cache))
@@ -131,23 +133,27 @@
   (begin
     (displayln (string-append "inode: " (~a nodeid)))
     (displayln (string-append "lookup name: " (path->string name)))
-    (match entry
-           [(nothing) (begin
-                        (displayln "No matching entry")
-                        (async-channel-put channel node-id-cache)
-                        (error 'ENOENT))]
-           [(just e) (begin
-                       (define cache-and-id (entry-node-id e))
-                       (displayln "Found matching entry")
-                       (reply-entry #:generation 0
-                                    #:entry-valid  (timespec 1 0) #:attr-valid  (timespec 1 0)
-                                    #:inode (car cache-and-id) #:rdev 0 #:size 13 #:blocks 1
-                                    #:atime  (timespec 1381237736 0) #:mtime  (timespec 1381237736 0)
-                                    #:ctime  (timespec 1381237736 0) #:kind (entry-kind e)
-                                    #:perm '(S_IRUSR S_IWUSR S_IRGRP S_IROTH)
-                                    #:nlink 1 #:uid 1000 #:gid 1000)
-                       (async-channel-put channel (cdr cache-and-id))
-                       )])))
+    (if (member (path->string name) blacklist)
+      (begin
+        (displayln "Name on blacklist")
+        (async-channel-put channel node-id-cache)
+        (error 'ENOENT))
+      (match (find-entry folder-id)
+             [(nothing) (begin
+                          (displayln "No matching entry")
+                          (async-channel-put channel node-id-cache)
+                          (error 'ENOENT))]
+             [(just e) (begin
+                         (define cache-and-id (entry-node-id e))
+                         (displayln "Found matching entry")
+                         (reply-entry #:generation 0
+                                      #:entry-valid  (timespec 1 0) #:attr-valid  (timespec 1 0)
+                                      #:inode (car cache-and-id) #:rdev 0 #:size 13 #:blocks 1
+                                      #:atime  (timespec 1381237736 0) #:mtime  (timespec 1381237736 0)
+                                      #:ctime  (timespec 1381237736 0) #:kind (entry-kind e)
+                                      #:perm '(S_IRUSR S_IWUSR S_IRGRP S_IROTH)
+                                      #:nlink 1 #:uid 1000 #:gid 1000)
+                         (async-channel-put channel (cdr cache-and-id)))]))))
 
 (define (handle-init http-request #:channel channel)
   (define root-id (get-root-id http-request))
