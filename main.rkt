@@ -137,7 +137,7 @@
                         (async-channel-put channel node-id-cache)
                         (error 'ENOENT))]
            [(just e) (begin
-                       (define cache-and-id (new-cache-and-id e))
+                       (define cache-and-id (entry-node-id e))
                        (displayln "Found matching entry")
                        (reply-entry #:generation 0
                                     #:entry-valid  (timespec 1 0) #:attr-valid  (timespec 1 0)
