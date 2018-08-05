@@ -8,13 +8,21 @@
          json
          racket/match
          racket/port
-         data/maybe)
+         data/maybe
+         gregor)
 
 (struct folder (name last-modified folder-id))
 (struct file (name last-modified entry-id))
 (struct http-response (status headers body))
 (struct http-request (get))
 (struct node (node-id-to-folder-id folder-id-to-node-id next-node-id))
+(struct file-metadata (last-modified created size))
+
+(define (list-all-but-last lst)
+  (match lst
+         [(list head) empty]
+         [(list-rest head tail) (cons head (list-all-but-last tail))]
+         [empty empty]))
 
 (define (list-find-first lst predicate)
   (match lst
@@ -89,6 +97,36 @@
       string<=?
       #:key extracting-entry-name)
     empty))
+
+(define (egnyte-time-to-posix time)
+  (->posix
+    (parse-datetime
+      (string-join
+        (list-all-but-last
+          (string-split
+            (hash-ref time 'last_modified))))
+      "ccc, dd LLL yyyy HH:mm:ss")))
+
+(define (get-file-metadata http-request file-id #:headers [headers empty])
+  (define with-accept (cons "Accept: application/json" headers))
+  (define response ((http-request-get http-request) (string-append "/pubapi/v1/fs/ids/file/" file-id) #:headers with-accept))
+  (define (versions entry)
+    (hash-ref entry 'num_versions))
+  (define (created-timestamp entry)
+    (if (= 1 (versions entry))
+      (egnyte-time-to-posix (hash-ref entry 'last_modified))
+      (argmin identity
+              (map
+                egnyte-time-to-posix
+                (hash-ref entry 'versions)))))
+  (define (body-to-meta body)
+    (file-metadata
+      (egnyte-time-to-posix (hash-ref body 'last_modified))
+      (created-timestamp body)
+      (hash-ref body 'size)))
+  (if (equal? (http-response-status response) 200)
+    (just (body-to-meta (string->jsexpr (http-response-body response))))
+    (nothing)))
 
 
 (define (mkdir #:nodeid nodeid #:name name #:mode mode #:umask umask #:reply reply-entry #:error error)
