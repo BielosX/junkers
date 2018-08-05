@@ -9,10 +9,11 @@
          racket/match
          racket/port
          data/maybe
-         gregor)
+         gregor
+         net/uri-codec)
 
-(struct folder (name last-modified folder-id))
-(struct file (name last-modified entry-id))
+(struct folder (name path last-modified folder-id))
+(struct file (name path last-modified entry-id))
 (struct http-response (status headers body))
 (struct http-request (get))
 (struct node (node-id-to-folder-id folder-id-to-node-id next-node-id))
@@ -49,11 +50,13 @@
 
 (define (folder-from-htable htable)
   (folder (hash-ref htable 'name)
+          (hash-ref htable 'path)
           (hash-ref htable 'lastModified)
           (hash-ref htable 'folder_id)))
 
 (define (file-from-htable htable)
   (file (hash-ref htable 'name)
+        (hash-ref htable 'path)
         (hash-ref htable 'last_modified)
         (hash-ref htable 'entry_id)))
 
@@ -89,8 +92,8 @@
   (define response ((http-request-get http-request) (string-append "/pubapi/v1/fs/ids/folder/" folder-id) #:headers with-accept))
   (define (extracting-entry-name entry)
     (match entry
-           [(file name _ _) name]
-           [(folder name _ _) name]))
+           [(file name _ _ _) name]
+           [(folder name _ _ _) name]))
   (if (equal? (http-response-status response) 200)
     (sort
       (parse-folder-content (http-response-body response))
@@ -107,9 +110,13 @@
             (hash-ref time 'last_modified))))
       "ccc, dd LLL yyyy HH:mm:ss")))
 
-(define (get-file-metadata http-request file-id #:headers [headers empty])
+(define (get-file-metadata http-request #:file-id [file-id ""] #:path [path ""] #:headers [headers empty])
   (define with-accept (cons "Accept: application/json" headers))
-  (define response ((http-request-get http-request) (string-append "/pubapi/v1/fs/ids/file/" file-id) #:headers with-accept))
+  (define response ((http-request-get http-request)
+                    (if (zero? (string-length path))
+                        (string-append "/pubapi/v1/fs/ids/file/" file-id)
+                        (string-append "/pubapi/v1/fs" (uri-encode path)))
+                    #:headers with-accept))
   (define (versions entry)
     (hash-ref entry 'num_versions))
   (define (created-timestamp entry)
@@ -143,8 +150,8 @@
 
 (define (by-name entry-name)
   (lambda (entry) (match entry
-                         [(file name _ _) (string=? entry-name name)]
-                         [(folder name _ _) (string=? entry-name name)])))
+                         [(file name _ _ _) (string=? entry-name name)]
+                         [(folder name _ _ _) (string=? entry-name name)])))
 
 (define blacklist (list ".git" "HEAD"))
 
@@ -162,12 +169,12 @@
       ))
   (define (entry-node-id entry)
     (match entry
-           [(folder _ _ folder-id) (new-cache-and-id folder-id)]
-           [(file _ _ entry-id) (new-cache-and-id entry-id)]))
+           [(folder _ _ _ folder-id) (new-cache-and-id folder-id)]
+           [(file _ _ _ entry-id) (new-cache-and-id entry-id)]))
   (define (entry-kind entry)
     (match entry
-           [(folder _ _ _) 'S_IFDIR]
-           [(file _ _ _) 'S_IFREG]))
+           [(folder _ _ _ _) 'S_IFDIR]
+           [(file _ _ _ _) 'S_IFREG]))
   (begin
     (displayln (string-append "inode: " (~a nodeid)))
     (displayln (string-append "lookup name: " (path->string name)))
@@ -183,6 +190,10 @@
                           (error 'ENOENT))]
              [(just e) (begin
                          (define cache-and-id (entry-node-id e))
+                         (define path (match e
+                                             [(folder _ path _ _) path]
+                                             [(file _ path _ _) path]))
+                         (displayln (string-append "Entry path: " path))
                          (displayln "Found matching entry")
                          (reply-entry #:generation 0
                                       #:entry-valid  (timespec 1 0) #:attr-valid  (timespec 1 0)
@@ -210,7 +221,7 @@
   (define (add-folder name inode offset) (reply-add #:inode inode #:offset offset #:kind 'S_IFDIR #:name (string->path name)))
   (match content
          [(list-rest head tail) (match head
-                                       [(file name _ entry-id) (begin
+                                       [(file name _ _ entry-id) (begin
                                                                    (displayln (string-append "filename: " name))
                                                                    (add-file name parent-nodeid  offset)
                                                                    (content-to-dentry tail
@@ -218,7 +229,7 @@
                                                                                       (add1 offset)
                                                                                       reply-add
                                                                                       reply-done))]
-                                       [(folder name _ folder-id) (begin
+                                       [(folder name _ _ folder-id) (begin
                                                                    (displayln (string-append "folder name " name))
                                                                       (add-folder name parent-nodeid offset)
                                                                       (content-to-dentry tail
