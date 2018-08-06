@@ -13,7 +13,7 @@
          net/uri-codec)
 
 (struct folder (name path last-modified folder-id))
-(struct file (name path last-modified entry-id))
+(struct file (name path last-modified entry-id group-id))
 (struct http-response (status headers body))
 (struct http-request (get))
 (struct node (node-id-to-folder-id folder-id-to-node-id next-node-id))
@@ -58,7 +58,8 @@
   (file (hash-ref htable 'name)
         (hash-ref htable 'path)
         (hash-ref htable 'last_modified)
-        (hash-ref htable 'entry_id)))
+        (hash-ref htable 'entry_id)
+        (hash-ref htable 'group-id)))
 
 (define (parse-folder-content json-content)
   (define (to-content-list folders files)
@@ -92,7 +93,7 @@
   (define response ((http-request-get http-request) (string-append "/pubapi/v1/fs/ids/folder/" folder-id) #:headers with-accept))
   (define (extracting-entry-name entry)
     (match entry
-           [(file name _ _ _) name]
+           [(file name _ _ _ _) name]
            [(folder name _ _ _) name]))
   (if (equal? (http-response-status response) 200)
     (sort
@@ -150,7 +151,7 @@
 
 (define (by-name entry-name)
   (lambda (entry) (match entry
-                         [(file name _ _ _) (string=? entry-name name)]
+                         [(file name _ _ _ _) (string=? entry-name name)]
                          [(folder name _ _ _) (string=? entry-name name)])))
 
 (define blacklist (list ".git" "HEAD"))
@@ -170,11 +171,11 @@
   (define (entry-node-id entry)
     (match entry
            [(folder _ _ _ folder-id) (new-cache-and-id folder-id)]
-           [(file _ _ _ entry-id) (new-cache-and-id entry-id)]))
+           [(file _ _ _ _ group-id) (new-cache-and-id group-id)]))
   (define (entry-kind entry)
     (match entry
            [(folder _ _ _ _) 'S_IFDIR]
-           [(file _ _ _ _) 'S_IFREG]))
+           [(file _ _ _ _ _) 'S_IFREG]))
   (begin
     (displayln (string-append "inode: " (~a nodeid)))
     (displayln (string-append "lookup name: " (path->string name)))
@@ -192,17 +193,24 @@
                          (define cache-and-id (entry-node-id e))
                          (define path (match e
                                              [(folder _ path _ _) path]
-                                             [(file _ path _ _) path]))
+                                             [(file _ path _ _ _) path]))
                          (displayln (string-append "Entry path: " path))
                          (displayln "Found matching entry")
-                         (reply-entry #:generation 0
-                                      #:entry-valid  (timespec 1 0) #:attr-valid  (timespec 1 0)
-                                      #:inode (car cache-and-id) #:rdev 0 #:size 13 #:blocks 1
-                                      #:atime  (timespec 1381237736 0) #:mtime  (timespec 1381237736 0)
-                                      #:ctime  (timespec 1381237736 0) #:kind (entry-kind e)
-                                      #:perm '(S_IRUSR S_IWUSR S_IRGRP S_IROTH)
-                                      #:nlink 1 #:uid 1000 #:gid 1000)
+                         (lookup-reply-entry path (car cache-and-id) (entry-kind e) reply-entry error http-request)
                          (async-channel-put channel (cdr cache-and-id)))]))))
+
+(define (lookup-reply-entry path inode kind reply-entry error request)
+  (define metadata (get-file-metadata request #:path path))
+  (match metadata
+         [(nothing) (error 'ENOENT)]
+         [(just meta) (reply-entry #:generation 0
+                                   #:entry-valid  (timespec 1 0) #:attr-valid  (timespec 1 0)
+                                   #:inode inode #:rdev 0 #:size (file-metadata-size meta) #:blocks 1
+                                   #:atime  (timespec 1381237736 0) #:mtime  (timespec 1381237736 0)
+                                   #:ctime  (timespec 1381237736 0) #:kind kind
+                                   #:perm '(S_IRUSR S_IWUSR S_IRGRP S_IROTH)
+                                   #:nlink 1 #:uid 1000 #:gid 1000
+                                   )]))
 
 (define (handle-init http-request #:channel channel)
   (define root-id (get-root-id http-request))
@@ -221,7 +229,7 @@
   (define (add-folder name inode offset) (reply-add #:inode inode #:offset offset #:kind 'S_IFDIR #:name (string->path name)))
   (match content
          [(list-rest head tail) (match head
-                                       [(file name _ _ entry-id) (begin
+                                       [(file name _ _ _ _) (begin
                                                                    (displayln (string-append "filename: " name))
                                                                    (add-file name parent-nodeid  offset)
                                                                    (content-to-dentry tail
@@ -229,7 +237,7 @@
                                                                                       (add1 offset)
                                                                                       reply-add
                                                                                       reply-done))]
-                                       [(folder name _ _ folder-id) (begin
+                                       [(folder name _ _ _) (begin
                                                                    (displayln (string-append "folder name " name))
                                                                       (add-folder name parent-nodeid offset)
                                                                       (content-to-dentry tail
@@ -275,29 +283,31 @@
     (content-to-dentry result node-id 1 reply-add reply-done)))
 
 
-(define (getattr #:nodeid nodeid #:info info #:reply reply-attr #:error error)
+(define (handle-getattr http-request
+                 #:channel channel
+                 #:nodeid nodeid
+                 #:info info
+                 #:reply reply-attr
+                 #:error error)
   (begin
-      (displayln (string-append "trying to get attr for inode: " (~a nodeid)))
-      (match nodeid
-             [1 (reply-attr #:attr-valid  (timespec 1 0)
-                             #:inode 1 #:rdev 0 #:size 0 #:blocks 0
-                             #:atime  (timespec 1381237736 0) #:mtime  (timespec 1381237736 0)
-                             #:ctime  (timespec 1381237736 0) #:kind 'S_IFDIR
-                             #:perm '(S_IRUSR S_IWUSR S_IXUSR S_IRGRP S_IXGRP S_IROTH S_IXOTH)
-                             #:nlink 1 #:uid 1000 #:gid 1000)]
-             [_ (begin
-                    (displayln (string-append "getattr inode: " (~a nodeid)))
-                    (error 'ENOENT)
-                  ) ])
-        )
-  )
+    (displayln (string-append "trying to get attr for inode: " (~a nodeid)))
+    (if (= 1 nodeid)
+      (reply-attr #:attr-valid  (timespec 1 0)
+                  #:inode 1 #:rdev 0 #:size 0 #:blocks 0
+                  #:atime  (timespec 1381237736 0) #:mtime  (timespec 1381237736 0)
+                  #:ctime  (timespec 1381237736 0) #:kind 'S_IFDIR
+                  #:perm '(S_IRUSR S_IWUSR S_IXUSR S_IRGRP S_IXGRP S_IROTH S_IXOTH)
+                  #:nlink 1 #:uid 1000 #:gid 1000)
+      (begin
+        (displayln (string-append "getattr inode: " (~a nodeid)))
+        (error 'ENOENT)))))
 
 (define (fs http-request)
   (let ([work-channel (make-async-channel #f)])
       (make-filesystem #:lookup (partial handler-lookup http-request #:channel work-channel)
                        #:init (partial handle-init http-request #:channel work-channel)
                        #:readdir (partial handler-readdir http-request #:channel work-channel)
-                       #:getattr getattr
+                       #:getattr (partial handle-getattr http-request #:channel work-channel)
                        #:mkdir mkdir)))
 
 (struct args ([domain #:mutable] [token #:mutable] [path #:mutable]))
